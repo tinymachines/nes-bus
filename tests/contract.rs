@@ -107,7 +107,7 @@ fn the_rd_mutation_flips_exactly_one_pin() {
         ext: 0,
         int_n: true,
         rst_n: true,
-        vout: 0.0,
+        vout: None,
         ale: false,
         ad: 0x55,
         a_hi: 0x2a,
@@ -126,8 +126,8 @@ fn the_frames_construct_with_every_field_named() {
     // names it.
     let _ = CpuPins {
         clk: false,
-        ad1: 0.0,
-        ad2: 0.0,
+        ad1: None,
+        ad2: None,
         rst_n: true,
         a: 0,
         d: 0,

@@ -33,8 +33,10 @@ pub struct PpuPins {
     /// /RST, pin 22.
     pub rst_n: bool,
     /// VOUT, pin 21: the composite level, in the transcribed level
-    /// table's units.
-    pub vout: f32,
+    /// table's units. `None` means the extractor does not sample this
+    /// pin (a digital extraction cannot); a consumer that needs it must
+    /// refuse `None` by name, never default it.
+    pub vout: Option<f32>,
     /// ALE, pin 39.
     pub ale: bool,
     /// AD0..AD7, pins 38 down to 31: the multiplexed low address/data.
@@ -65,9 +67,11 @@ pub struct CpuPins {
     /// CLK, pin 29: the 21.477272 MHz master in.
     pub clk: bool,
     /// AD1 and AD2, pins 1 and 2: the audio driver levels, in the units
-    /// the mixer table uses.
-    pub ad1: f32,
-    pub ad2: f32,
+    /// the mixer table uses. `None` means the extractor does not sample
+    /// them (a digital extraction cannot); a consumer that needs them
+    /// must refuse `None` by name, never default it.
+    pub ad1: Option<f32>,
+    pub ad2: Option<f32>,
     /// /RST, pin 3.
     pub rst_n: bool,
     /// A0..A15, pins 4..19.
