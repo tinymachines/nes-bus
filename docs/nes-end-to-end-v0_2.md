@@ -1,3 +1,8 @@
+> The committed home of this document is now the console repository,
+> [tinymachines/nes](https://github.com/tinymachines/nes/blob/main/docs/nes-end-to-end-v0_2.md)
+> (since N4, 2026-09-05). This copy stays as the pointer the sketch said
+> it would become; edits go there.
+
 # The console: end-to-end NES with CRT output, v0.2
 
 Drafted 2026-09-02 as v0.1; amended and ratified by the director the
