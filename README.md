@@ -19,7 +19,7 @@ dependencies, no die data, changed by nobody without a note.
 |---|---|---|
 | crate root | `FrameParity`, the NES frame constants, `DotFrame` | Moved from ntsc-crt (`ntsc-grid` / `ntsc-source-nes` re-export them); measured there by the grid suite and filled by the 2c02 repo's P1 golden |
 | `pins` | `PpuPins`, `CpuPins`, the two 40-pin DIP tables | Authored from the nesdev wiki pinout pages, fetched 2026-09-02 |
-| `cart` | `CartEdge`, the 72-pin table, the `Cartridge` trait, `Nrom` | Authored from the nesdev wiki cartridge connector page and the NES-001 schematic |
+| `cart` | `CartEdge`, the 72-pin table, the `Cartridge` trait, `Nrom`, `Gxrom` (mapper 66, for the bench's cartridge) | Authored from the nesdev wiki cartridge connector page and the NES-001 schematic |
 | `audio` | `AudioSamples`, the AD1/AD2 stream with its rate as an exact ratio | Authored; first consumer is the 2A03 repo's first-sound milestone |
 
 Authored means: the table is the claim until a gate in a chip repo holds

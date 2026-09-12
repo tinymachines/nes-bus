@@ -23,7 +23,7 @@
 //!   a chip repo holds it to a netlist pad or a scope capture, and the
 //!   milestone reports say which.
 //! - [`cart`]: the 72-pin cartridge edge, the [`cart::Cartridge`] trait,
-//!   and NROM, its first and only in-scope implementor. AUTHORED from
+//!   and NROM, its first implementor; GxROM (mapper 66) joined it 2026-09-12 for the bench's own cartridge. AUTHORED from
 //!   the nesdev wiki's cartridge connector page (fetched 2026-09-02)
 //!   and the NES-001 schematic.
 //! - [`audio`]: the AD1/AD2 sample stream. AUTHORED; its first consumer

@@ -167,7 +167,8 @@ pub trait Cartridge {
 
 /// Mapper 0: 16 KiB (mirrored) or 32 KiB PRG ROM, 8 KiB CHR ROM, the
 /// mirroring solder option, no PRG RAM (the Family BASIC variant is out
-/// of scope, like every other mapper).
+/// of scope). The one other board here is `Gxrom`, mapper 66, added
+/// 2026-09-12 because the bench's cartridge is one.
 pub struct Nrom {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -220,6 +221,91 @@ impl Cartridge for Nrom {
             Mirroring::Horizontal => ppu_a & 0x0800 != 0,
         };
         // /CE is wired to PPU /A13: enabled (low) when A13 is high.
+        let ce_n = ppu_a & 0x2000 == 0;
+        (a10, ce_n)
+    }
+}
+
+/// Mapper 66, GNROM and MHROM: 64 or 128 KiB of PRG ROM in 32 KiB banks,
+/// 8 to 32 KiB of CHR ROM in 8 KiB banks, one write-only register at
+/// $8000-$FFFF selecting both (bits 4 and 5 the PRG bank, bits 0 and 1
+/// the CHR bank), the mirroring solder option, no PRG RAM. The board has
+/// no bus-conflict protection: a write is ANDed with the ROM byte at the
+/// address it hits, as on the part (games write to an address whose ROM
+/// byte equals the value for that reason). Super Mario Bros. + Duck Hunt
+/// is this board (MHROM: 64 KiB PRG, 16 KiB CHR).
+///
+/// AUTHORED: the register's power-on value is not defined by the part; it
+/// is 0 here (bank 0 of each), and nothing measured says otherwise yet.
+pub struct Gxrom {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    mirroring: Mirroring,
+    bank: u8,
+}
+
+impl Gxrom {
+    /// `prg` must be 64 or 128 KiB; `chr` 8, 16 or 32 KiB. Refuses
+    /// anything else by name rather than padding quietly.
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, mirroring: Mirroring) -> Result<Gxrom, String> {
+        match prg.len() {
+            0x10000 | 0x20000 => {}
+            n => return Err(format!("GxROM PRG must be 64 or 128 KiB, got {n} bytes")),
+        }
+        match chr.len() {
+            0x2000 | 0x4000 | 0x8000 => {}
+            n => return Err(format!("GxROM CHR must be 8, 16 or 32 KiB, got {n} bytes")),
+        }
+        Ok(Gxrom { prg, chr, mirroring, bank: 0 })
+    }
+
+    /// The register as last written (bits 4 and 5 PRG, bits 0 and 1 CHR).
+    pub fn bank(&self) -> u8 {
+        self.bank
+    }
+
+    fn prg_index(&self, a: u16) -> usize {
+        let bank = ((self.bank >> 4) & 0x03) as usize;
+        (bank * 0x8000 + (a as usize - 0x8000)) % self.prg.len()
+    }
+}
+
+impl Cartridge for Gxrom {
+    fn cpu_read(&mut self, a: u16) -> Option<u8> {
+        if a >= 0x8000 {
+            Some(self.prg[self.prg_index(a)])
+        } else {
+            None
+        }
+    }
+
+    fn cpu_write(&mut self, a: u16, v: u8) {
+        if a >= 0x8000 {
+            // Bus conflict: the ROM drives the data bus at the same time,
+            // and the register sees the AND of the two.
+            let rom = self.prg[self.prg_index(a)];
+            self.bank = v & rom;
+        }
+    }
+
+    fn chr_read(&mut self, a: u16) -> Option<u8> {
+        if a < 0x2000 {
+            let bank = (self.bank & 0x03) as usize;
+            Some(self.chr[(bank * 0x2000 + a as usize) % self.chr.len()])
+        } else {
+            None
+        }
+    }
+
+    fn chr_write(&mut self, _a: u16, _v: u8) {
+        // CHR is ROM on GxROM.
+    }
+
+    fn ciram(&self, ppu_a: u16) -> (bool, bool) {
+        let a10 = match self.mirroring {
+            Mirroring::Vertical => ppu_a & 0x0400 != 0,
+            Mirroring::Horizontal => ppu_a & 0x0800 != 0,
+        };
         let ce_n = ppu_a & 0x2000 == 0;
         (a10, ce_n)
     }

@@ -3,7 +3,7 @@
 //! the N0 gate (ntsc-crt and 2c02 compiling against these types with
 //! their goldens unchanged) lives in those repos' own suites.
 
-use nes_bus::cart::{CartEdge, Cartridge, Mirroring, Nrom, CART_PINS};
+use nes_bus::cart::{CartEdge, Cartridge, Gxrom, Mirroring, Nrom, CART_PINS};
 use nes_bus::pins::{CpuPins, PpuPins, CPU_PINS, PPU_PINS};
 use nes_bus::{DotFrame, FrameParity, ACTIVE_DOTS, ACTIVE_ROWS, DOTS_PER_LINE, LINES};
 
@@ -161,4 +161,51 @@ fn the_frames_construct_with_every_field_named() {
         ciram_a10: false,
         ciram_ce_n: true,
     };
+}
+
+/// Mapper 66: 32 KiB PRG banks and 8 KiB CHR banks from one register,
+/// the write ANDed with the ROM byte it lands on, and the sizes refused
+/// by name. Every branch here fails without the code it tests: the
+/// bank switch, the conflict, and the size check each have a mutation
+/// (drop the AND, ignore bits 4 and 5, accept any size) that this catches.
+#[test]
+fn gxrom_switches_both_banks_from_one_register_through_a_bus_conflict() {
+    // PRG: bank b holds b everywhere except one byte of 0xFF at $8000's
+    // slot, so a write of 0x3F there is not masked by the conflict.
+    let mut prg = vec![0u8; 0x10000];
+    for b in 0..2usize {
+        for i in 0..0x8000usize {
+            prg[b * 0x8000 + i] = b as u8;
+        }
+        prg[b * 0x8000] = 0xFF;
+    }
+    let mut chr = vec![0u8; 0x4000];
+    for b in 0..2usize {
+        for i in 0..0x2000usize {
+            chr[b * 0x2000 + i] = 0x10 + b as u8;
+        }
+    }
+    let mut c = Gxrom::new(prg, chr, Mirroring::Vertical).unwrap();
+    assert_eq!(c.cpu_read(0x8001), Some(0), "power-on: PRG bank 0");
+    assert_eq!(c.chr_read(0x0010), Some(0x10), "power-on: CHR bank 0");
+    c.cpu_write(0x8000, 0x11); // PRG bank 1, CHR bank 1; ROM byte there is 0xFF, no masking
+    assert_eq!(c.bank(), 0x11);
+    assert_eq!(c.cpu_read(0x8001), Some(1), "PRG bank 1 after the write");
+    assert_eq!(c.chr_read(0x0010), Some(0x11), "CHR bank 1 after the write");
+    // The conflict: writing 0x00 at an address whose ROM byte is 1 gives
+    // 0 (bank 0); writing 0x11 there gives 0x11 & 0x01 = 0x01.
+    c.cpu_write(0x9000, 0x11);
+    assert_eq!(c.bank(), 0x01, "the register sees the write ANDed with the ROM byte");
+    assert_eq!(c.cpu_read(0x8001), Some(0));
+    assert_eq!(c.chr_read(0x0010), Some(0x11));
+    // Below $8000 the register is not reached.
+    c.cpu_write(0x6000, 0x11);
+    assert_eq!(c.bank(), 0x01);
+    // Sizes refused by name.
+    assert!(Gxrom::new(vec![0; 0x8000], vec![0; 0x2000], Mirroring::Vertical).is_err());
+    assert!(Gxrom::new(vec![0; 0x10000], vec![0; 0x1000], Mirroring::Vertical).is_err());
+    // Mirroring pins as NROM's.
+    let v = Gxrom::new(vec![0; 0x10000], vec![0; 0x2000], Mirroring::Vertical).unwrap();
+    assert_eq!(v.ciram(0x2400), (true, false));
+    assert_eq!(v.ciram(0x2800), (false, false));
 }
