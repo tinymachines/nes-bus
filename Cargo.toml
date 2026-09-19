@@ -1,9 +1,9 @@
 [package]
 name = "nes-bus"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
-description = "The NES console's inter-chip contracts in one dependency-free crate: the 2A03 and 2C02 pin frames, the 72-pin cartridge edge, the cartridge trait with NROM, the PPU's DotFrame, and the audio sample stream."
+description = "The NES console's inter-chip contracts in one dependency-free crate: the 2A03 and 2C02 pin frames, the 72-pin cartridge edge, the cartridge trait with NROM, GxROM and MMC3, the PPU's DotFrame, and the audio sample stream."
 repository = "https://github.com/tinymachines/nes-bus"
 
 [dependencies]

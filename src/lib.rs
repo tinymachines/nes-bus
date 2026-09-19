@@ -23,9 +23,12 @@
 //!   a chip repo holds it to a netlist pad or a scope capture, and the
 //!   milestone reports say which.
 //! - [`cart`]: the 72-pin cartridge edge, the [`cart::Cartridge`] trait,
-//!   and NROM, its first implementor; GxROM (mapper 66) joined it 2026-09-12 for the bench's own cartridge. AUTHORED from
-//!   the nesdev wiki's cartridge connector page (fetched 2026-09-02)
-//!   and the NES-001 schematic.
+//!   and NROM, its first implementor; GxROM (mapper 66) joined it
+//!   2026-09-12 for the bench's own cartridge, and MMC3 (mapper 4, with
+//!   the scanline counter that watches PPU A12 and drives /IRQ)
+//!   2026-09-20, for the games that bank. AUTHORED from the nesdev
+//!   wiki's cartridge connector page (fetched 2026-09-02), its MMC3 page
+//!   (fetched 2026-09-20) and the NES-001 schematic.
 //! - [`audio`]: the AD1/AD2 sample stream. AUTHORED; its first consumer
 //!   is the 2A03 repo's first-sound milestone.
 //!

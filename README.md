@@ -19,7 +19,7 @@ dependencies, no die data, changed by nobody without a note.
 |---|---|---|
 | crate root | `FrameParity`, the NES frame constants, `DotFrame` | Moved from ntsc-crt (`ntsc-grid` / `ntsc-source-nes` re-export them); measured there by the grid suite and filled by the 2c02 repo's P1 golden |
 | `pins` | `PpuPins`, `CpuPins`, the two 40-pin DIP tables | Authored from the nesdev wiki pinout pages, fetched 2026-09-02 |
-| `cart` | `CartEdge`, the 72-pin table, the `Cartridge` trait, `Nrom`, `Gxrom` (mapper 66, for the bench's cartridge) | Authored from the nesdev wiki cartridge connector page and the NES-001 schematic |
+| `cart` | `CartEdge`, the 72-pin table, the `Cartridge` trait, `Nrom`, `Gxrom` (mapper 66, for the bench's cartridge), `Mmc3` (mapper 4, with the scanline counter on PPU A12) | Authored from the nesdev wiki cartridge connector, MMC3 and pinout pages, and the NES-001 schematic |
 | `audio` | `AudioSamples`, the AD1/AD2 stream with its rate as an exact ratio | Authored; first consumer is the 2A03 repo's first-sound milestone |
 
 Authored means: the table is the claim until a gate in a chip repo holds
@@ -31,9 +31,22 @@ does so says which pins it covered.
 ```bash
 cargo test          # the contract held to itself: encodings pinned,
                     # tables closed, NROM's CIRAM pins per the solder
-                    # options
+                    # options, MMC3's two banking modes and its CHR
+                    # inversion, and its counter clocked once a line
+                    # with the sprite window's gaps filtered out
+                    # (`without_the_filter_for_proof` is the board that
+                    # must count nine times instead, so the claim can
+                    # fail)
 cargo clippy --all-targets
 ```
+
+A cartridge that counts lines needs two things from a console that NROM
+never did, and both are trait methods with defaults so a board without
+them is unchanged: `ppu_bus` is every PPU access with the console's dot,
+because what MMC3 counts is the LINE A12 and not the data, and `irq` is
+pin 15 as the cartridge drives it. `owns_chr_ram` is the third: a board
+that banks its own CHR RAM says so, and the console keeps no second
+copy.
 
 The other half of the N0 gate lives in the dependent repositories:
 ntsc-crt and 2c02 compile against these types with their existing
