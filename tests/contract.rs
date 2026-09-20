@@ -3,7 +3,7 @@
 //! the N0 gate (ntsc-crt and 2c02 compiling against these types with
 //! their goldens unchanged) lives in those repos' own suites.
 
-use nes_bus::cart::{CartEdge, Cartridge, Cnrom, Gxrom, Mirroring, Mmc1, Mmc1Mirroring, Mmc2, Mmc3, Nrom, Uxrom, CART_PINS, A12_FILTER_DOTS};
+use nes_bus::cart::{A12Watcher, CartEdge, Cartridge, Cnrom, Gxrom, Mirroring, Mmc1, Mmc1Mirroring, Mmc2, Mmc3, Nrom, Uxrom, CART_PINS, A12_FILTER_DOTS};
 use nes_bus::pins::{CpuPins, PpuPins, CPU_PINS, PPU_PINS};
 use nes_bus::{DotFrame, FrameParity, ACTIVE_DOTS, ACTIVE_ROWS, DOTS_PER_LINE, LINES};
 
@@ -652,4 +652,33 @@ fn mmc2_drives_ciram_from_its_register() {
     assert_eq!(c.ciram(0x2400), (false, false), "bit 0 set puts it on PPU A11");
     assert_eq!(c.ciram(0x2800), (true, false));
     assert!(c.ciram(0x1000).1, "/CE follows PPU A13 either way");
+}
+
+/// The filter's own boundary, stated as the pair of dots on either side
+/// of it.
+///
+/// Nine dots of A12 low is exactly three CPU cycles, so the third
+/// falling edge of M2 lands ON the rise rather than before it and the
+/// part does not count it; ten does. That one dot is a whole clock a
+/// frame with the background at $1000, where A12 falls after the
+/// pre-render line's last pattern fetch and rises again at line 0's
+/// first, nine dots later: at nine the frame came to 242 clocks on
+/// alternate frames where the part makes 241, which is what blargg's
+/// `2-details` and `4-scanline_timing` both caught.
+#[test]
+fn the_a12_filter_takes_ten_dots_of_low_and_not_nine() {
+    let count_after = |low_dots: u64| {
+        let mut w = A12Watcher::default();
+        // High, then low, then high again after `low_dots`.
+        w.saw(0x1000, 0);
+        w.saw(0x0000, 1);
+        w.saw(0x1000, 1 + low_dots);
+        w.rises
+    };
+    assert_eq!(A12_FILTER_DOTS, 10, "the filter is ten dots and the two cases below are its edges");
+    assert_eq!(count_after(9), 0, "nine dots is three CPU cycles exactly: the third M2 fall is not BEFORE the rise");
+    assert_eq!(count_after(10), 1, "ten is, and the rise reaches the counter");
+    // And far outside it, both ways.
+    assert_eq!(count_after(2), 0, "two dots is a gap between sprite slots");
+    assert_eq!(count_after(340), 1, "a line is a line");
 }

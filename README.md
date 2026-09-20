@@ -47,7 +47,9 @@ cargo test          # the contract held to itself: encodings pinned,
                     # latches, flipped by the PPU's fetches after the
                     # byte is read and not before, with the asymmetry
                     # between them stated as a difference ($0FD9 is not
-                    # a trigger, $1FE9 is)
+                    # a trigger, $1FE9 is); and the A12 filter's own
+                    # boundary, the two dots either side of it, which
+                    # is one clock a frame with the background at $1000
 cargo clippy --all-targets
 ```
 

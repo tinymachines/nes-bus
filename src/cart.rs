@@ -363,7 +363,27 @@ impl Cartridge for Gxrom {
 /// A12 low each, do NOT clock the counter, while the tile fetches of
 /// the next line, hundreds of dots, do. blargg's `3.A12_clocking` is
 /// the ROM that measures the boundary.
-pub const A12_FILTER_DOTS: u64 = 9;
+///
+/// **Ten and not nine, and the difference is one window a frame.** With
+/// the background at $1000 ($2000 bit 4 set) A12 falls after the
+/// pre-render line's last pattern fetch and rises again at the first
+/// pattern fetch of line 0, and the gap is exactly NINE dots: the two
+/// dummy nametable fetches that end a line, then line 0's own nametable
+/// and attribute. Nine dots is exactly three CPU cycles, so the third
+/// falling edge of M2 lands ON the rise rather than before it, and
+/// "remained low FOR three falling edges" is not met. At nine this
+/// board counted that rise and a frame came to 242 clocks on alternate
+/// frames where the part makes 241; at ten it does not, and blargg's
+/// `2-details` (241 a frame) and `4-scanline_timing` (the interrupt
+/// bracketed to one PPU clock) both hold.
+///
+/// That argument is about a phase, and a count of dots cannot express a
+/// phase: whether three M2 falls fit strictly inside a nine-dot window
+/// depends on where the window starts against the CPU's clock, which a
+/// console knows and this constant does not. Counting M2's own falls is
+/// the rule the part has and the open item here; ten dots is the value
+/// that agrees with the part everywhere the ROMs look.
+pub const A12_FILTER_DOTS: u64 = 10;
 
 /// PPU A12 as a counting cartridge sees it: every address the PPU puts
 /// on the bus goes in with the dot it was on, and a rise is counted only
