@@ -3,7 +3,7 @@
 //! the N0 gate (ntsc-crt and 2c02 compiling against these types with
 //! their goldens unchanged) lives in those repos' own suites.
 
-use nes_bus::cart::{CartEdge, Cartridge, Gxrom, Mirroring, Mmc3, Nrom, CART_PINS, A12_FILTER_DOTS};
+use nes_bus::cart::{CartEdge, Cartridge, Cnrom, Gxrom, Mirroring, Mmc1, Mmc1Mirroring, Mmc3, Nrom, Uxrom, CART_PINS, A12_FILTER_DOTS};
 use nes_bus::pins::{CpuPins, PpuPins, CPU_PINS, PPU_PINS};
 use nes_bus::{DotFrame, FrameParity, ACTIVE_DOTS, ACTIVE_ROWS, DOTS_PER_LINE, LINES};
 
@@ -366,4 +366,196 @@ fn mmc3_without_its_filter_counts_the_sprite_windows_gaps_too() {
         }
     }
     assert_eq!(c.clocks().0, 8, "one rise a slot with no filter, where the part counts once a line");
+}
+
+/// UxROM: the low half of the window switches and the high half does
+/// not, through the same bus conflict GxROM has. Each bank filled with
+/// its own index, so the byte read back names the bank that answered.
+#[test]
+fn uxrom_switches_the_low_half_and_fixes_the_last_bank_high() {
+    let mut prg = vec![0u8; 8 * 0x4000];
+    for (i, b) in prg.chunks_mut(0x4000).enumerate() {
+        b.fill(i as u8);
+        // One byte of $FF at each bank's start, so a write there is not
+        // masked by the conflict.
+        b[0] = 0xff;
+    }
+    let mut c = Uxrom::new(prg, Vec::new(), Mirroring::Vertical).unwrap();
+    assert_eq!(c.cpu_read(0x8001), Some(0), "power-on: bank 0 low");
+    assert_eq!(c.cpu_read(0xc001), Some(7), "the last bank is fixed high");
+    c.cpu_write(0x8000, 0x05);
+    assert_eq!(c.bank(), 5);
+    assert_eq!(c.cpu_read(0x8001), Some(5), "bank 5 low");
+    assert_eq!(c.cpu_read(0xc001), Some(7), "and the high half has not moved");
+    // The conflict: at $8001 the ROM byte is 5, so a write of 3 lands as
+    // 3 & 5 = 1.
+    c.cpu_write(0x8001, 0x03);
+    assert_eq!(c.bank(), 0x01, "the register sees the write ANDed with the ROM byte");
+    // Below $8000 the register is not reached.
+    c.cpu_write(0x6000, 0x07);
+    assert_eq!(c.bank(), 0x01);
+    // CHR is the board's own RAM, and it says so.
+    assert!(c.owns_chr_ram());
+    c.chr_write(0x0123, 0x5a);
+    assert_eq!(c.chr_read(0x0123), Some(0x5a));
+    assert_eq!(c.chr_read(0x2000), None, "the board answers below $2000 only");
+    // Refused by name: CHR ROM, and a size that is not whole banks.
+    assert!(Uxrom::new(vec![0; 0x8000], vec![0; 0x2000], Mirroring::Vertical).is_err());
+    assert!(Uxrom::new(vec![0; 0x5000], Vec::new(), Mirroring::Vertical).is_err());
+    assert!(Uxrom::new(vec![0; 0x80000], Vec::new(), Mirroring::Vertical).is_err());
+}
+
+/// CNROM: the PRG does not move, the CHR does, and the latch is two bits
+/// wide, so a write of $07 selects bank 3.
+#[test]
+fn cnrom_switches_chr_only_and_latches_two_bits() {
+    let mut prg = vec![0u8; 0x8000];
+    prg.fill(0xff);
+    let mut chr = vec![0u8; 4 * 0x2000];
+    for (i, b) in chr.chunks_mut(0x2000).enumerate() {
+        b.fill(0x10 + i as u8);
+    }
+    let mut c = Cnrom::new(prg, chr, Mirroring::Horizontal).unwrap();
+    assert_eq!(c.chr_read(0x0010), Some(0x10), "power-on: CHR bank 0");
+    c.cpu_write(0x8000, 0x02);
+    assert_eq!(c.bank(), 2);
+    assert_eq!(c.chr_read(0x0010), Some(0x12));
+    assert_eq!(c.cpu_read(0x8000), Some(0xff), "PRG does not move on this board");
+    // Two bits: $07 is bank 3, not bank 7, and there is no bank 7 to
+    // reach. The ROM is all $FF, so the conflict masks nothing.
+    c.cpu_write(0xffff, 0x07);
+    assert_eq!(c.bank(), 3);
+    assert_eq!(c.chr_read(0x0010), Some(0x13));
+    // Mirroring pins as NROM's.
+    assert_eq!(c.ciram(0x2400), (false, false));
+    assert_eq!(c.ciram(0x2800), (true, false));
+    assert!(!c.owns_chr_ram());
+    assert!(Cnrom::new(vec![0; 0x2000], vec![0; 0x2000], Mirroring::Vertical).is_err());
+    assert!(Cnrom::new(vec![0; 0x8000], vec![0; 0x1000], Mirroring::Vertical).is_err());
+}
+
+/// One five-bit word through MMC1's serial port, the way a game writes
+/// it: five writes carrying bit 0, lowest first, and the FIFTH write's
+/// address choosing the register.
+fn mmc1_write(c: &mut Mmc1, a: u16, word: u8) {
+    for i in 0..5 {
+        c.cpu_write(a, (word >> i) & 1);
+    }
+}
+
+/// MMC1's three PRG modes and its two CHR modes, from the register
+/// writes a game makes.
+#[test]
+fn mmc1_banks_prg_and_chr_the_way_its_modes_say() {
+    let mut prg = vec![0u8; 8 * 0x4000];
+    for (i, b) in prg.chunks_mut(0x4000).enumerate() {
+        b.fill(i as u8);
+    }
+    let mut chr = vec![0u8; 8 * 0x1000];
+    for (i, b) in chr.chunks_mut(0x1000).enumerate() {
+        b.fill(0x10 + i as u8);
+    }
+    let mut c = Mmc1::new(prg, chr, Mirroring::Vertical).unwrap();
+    // Power-on is the reset state: PRG mode 3, the last bank at $C000.
+    assert_eq!(c.registers().0, 0x0c);
+    assert_eq!(c.cpu_read(0x8000), Some(0), "mode 3: bank 0 at $8000");
+    assert_eq!(c.cpu_read(0xc000), Some(7), "mode 3: the last bank at $C000");
+    mmc1_write(&mut c, 0xe000, 5);
+    assert_eq!(c.cpu_read(0x8000), Some(5));
+    assert_eq!(c.cpu_read(0xc000), Some(7), "the fixed half does not move");
+    // Mode 2: the FIRST bank fixed low, the selection high.
+    mmc1_write(&mut c, 0x8000, 0x08);
+    assert_eq!(c.cpu_read(0x8000), Some(0), "mode 2: bank 0 fixed at $8000");
+    assert_eq!(c.cpu_read(0xc000), Some(5), "mode 2: the selection at $C000");
+    // Mode 0: one 32 KiB bank, the selection's low bit ignored.
+    mmc1_write(&mut c, 0x8000, 0x00);
+    assert_eq!(c.cpu_read(0x8000), Some(4), "mode 0: the pair starting at 4");
+    assert_eq!(c.cpu_read(0xc000), Some(5), "mode 0: and its second half");
+    // CHR, 8 KiB at a time (control bit 4 clear, as it is now): chr0's
+    // low bit is ignored and the halves follow each other.
+    mmc1_write(&mut c, 0xa000, 3);
+    assert_eq!(c.chr_read(0x0000), Some(0x12), "8 KiB mode: the pair starting at 2");
+    assert_eq!(c.chr_read(0x1000), Some(0x13));
+    // Two 4 KiB banks: control bit 4 set, and chr1 now reaches $1000.
+    mmc1_write(&mut c, 0x8000, 0x10);
+    mmc1_write(&mut c, 0xa000, 3);
+    mmc1_write(&mut c, 0xc000, 6);
+    assert_eq!(c.chr_read(0x0000), Some(0x13), "4 KiB mode: chr0 exactly");
+    assert_eq!(c.chr_read(0x1000), Some(0x16), "4 KiB mode: chr1 at $1000");
+}
+
+/// MMC1's four mirroring modes, at the pin. Two of them are one screen,
+/// which no solder option can do and which is why this board keeps its
+/// own enum.
+#[test]
+fn mmc1_drives_ciram_four_ways_including_one_screen() {
+    let mut c = Mmc1::new(vec![0; 0x8000], vec![0; 0x2000], Mirroring::Vertical).unwrap();
+    for (bits, mode, lower, upper) in [
+        (0u8, Mmc1Mirroring::OneScreenLower, false, false),
+        (1, Mmc1Mirroring::OneScreenUpper, true, true),
+        (2, Mmc1Mirroring::Vertical, false, true),
+        (3, Mmc1Mirroring::Horizontal, false, false),
+    ] {
+        mmc1_write(&mut c, 0x8000, bits);
+        assert_eq!(c.mirroring(), mode, "control bits {bits}");
+        assert_eq!(c.ciram(0x2000).0, lower, "{mode:?} at $2000");
+        assert_eq!(c.ciram(0x2400).0, upper, "{mode:?} at $2400");
+        assert!(!c.ciram(0x2000).1, "/CE follows PPU A13, not the mode");
+        assert!(c.ciram(0x1000).1);
+    }
+    // Horizontal is the one that reads A11, so $2800 is the other page.
+    mmc1_write(&mut c, 0x8000, 3);
+    assert!(c.ciram(0x2800).0);
+}
+
+/// A write with bit 7 set clears the serial port and forces PRG mode 3,
+/// and leaves the rest of the control register alone. This is how every
+/// SxROM game's reset code starts.
+#[test]
+fn mmc1_reset_write_clears_the_port_and_fixes_the_last_bank() {
+    let mut prg = vec![0u8; 8 * 0x4000];
+    for (i, b) in prg.chunks_mut(0x4000).enumerate() {
+        b.fill(i as u8);
+    }
+    let mut c = Mmc1::new(prg, vec![0; 0x2000], Mirroring::Vertical).unwrap();
+    // Horizontal mirroring, PRG mode 0, 4 KiB CHR: control = $13.
+    mmc1_write(&mut c, 0x8000, 0x13);
+    assert_eq!(c.registers().0, 0x13);
+    assert_eq!(c.cpu_read(0xc000), Some(1), "mode 0 before the reset write");
+    // Three bits into the port, then the reset.
+    c.cpu_write(0xe000, 1);
+    c.cpu_write(0xe000, 1);
+    c.cpu_write(0xe000, 1);
+    assert_eq!(c.shift_state(), (0b111, 3));
+    c.cpu_write(0xe000, 0x80);
+    assert_eq!(c.shift_state(), (0, 0), "the port is cleared");
+    assert_eq!(c.registers().0, 0x1f, "PRG mode 3 is ORed in; mirroring and CHR mode stand");
+    assert_eq!(c.cpu_read(0xc000), Some(7), "and the last bank is at $C000");
+}
+
+/// Two writes on consecutive CPU cycles are one write: the port takes
+/// the first and ignores the second, which is what an RMW instruction's
+/// dummy write and real write are. Without the rule an `INC $8000`
+/// shifts twice and every word after it is wrong.
+#[test]
+fn mmc1_ignores_the_second_write_of_a_pair_on_consecutive_cycles() {
+    let build = || Mmc1::new(vec![0; 0x8000], vec![0; 0x2000], Mirroring::Vertical).unwrap();
+    // Three dots to a CPU cycle: an RMW's two writes are three apart.
+    let rmw = |c: &mut Mmc1, dot: u64, v: u8| {
+        c.cpu_write_at(0x8000, v, dot);
+        c.cpu_write_at(0x8000, v, dot + nes_bus::cart::MMC1_PAIR_DOTS);
+    };
+    let mut c = build();
+    rmw(&mut c, 100, 1);
+    assert_eq!(c.shift_state(), (1, 1), "one bit in, not two");
+    rmw(&mut c, 200, 1);
+    assert_eq!(c.shift_state(), (0b11, 2));
+    // And two writes far apart are two writes.
+    c.cpu_write_at(0x8000, 1, 300);
+    c.cpu_write_at(0x8000, 1, 400);
+    assert_eq!(c.shift_state(), (0b1111, 4));
+    // The proof that the rule is what does it.
+    let mut m = build().without_the_pair_rule_for_proof();
+    rmw(&mut m, 100, 1);
+    assert_eq!(m.shift_state(), (0b11, 2), "without the rule the RMW shifts twice");
 }

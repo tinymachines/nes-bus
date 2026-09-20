@@ -1,6 +1,7 @@
 //! The cartridge edge: the NES-001 72-pin connector as a typed struct,
 //! the trait the console plugs a cartridge in through, and the boards:
-//! NROM (mapper 0), GxROM (66) and MMC3 (4).
+//! NROM (mapper 0), MMC1 (1), UxROM (2), CNROM (3), MMC3 (4) and
+//! GxROM (66).
 //!
 //! AUTHORED from the nesdev wiki's cartridge connector page (fetched
 //! 2026-09-02) and the NES-001 schematic. Two facts worth stating
@@ -156,6 +157,19 @@ pub trait Cartridge {
     fn cpu_read(&mut self, a: u16) -> Option<u8>;
     /// CPU bus write at `a`.
     fn cpu_write(&mut self, a: u16, v: u8);
+
+    /// The same write, with the console's PPU dot at the moment it
+    /// reached the edge. A board that must tell two writes on
+    /// CONSECUTIVE CPU cycles apart overrides this: MMC1's serial port
+    /// ignores the second of such a pair, which is what an RMW
+    /// instruction's dummy write and real write are. Every other board
+    /// takes the default, which forwards to `cpu_write` and never looks
+    /// at the time. A call to `cpu_write` itself carries no time and is
+    /// therefore never part of a pair, which is what a test that means
+    /// to write twice in a row wants.
+    fn cpu_write_at(&mut self, a: u16, v: u8, _dot: u64) {
+        self.cpu_write(a, v);
+    }
     /// PPU bus read at `a` (14-bit).
     fn chr_read(&mut self, a: u16) -> Option<u8>;
     /// PPU bus write at `a`.
@@ -673,6 +687,437 @@ impl Cartridge for Mmc3 {
 
     fn irq(&self) -> bool {
         self.irq_pending
+    }
+
+    fn owns_chr_ram(&self) -> bool {
+        self.chr_is_ram
+    }
+}
+
+/// Mapper 2, UxROM (UNROM and UOROM): 128 or 256 KiB of PRG ROM, the
+/// low half of the window switched 16 KiB at a time and the high half
+/// fixed at the last bank, 8 KiB of CHR RAM, the mirroring solder
+/// option, no PRG RAM. One write-only register anywhere in
+/// $8000-$FFFF.
+///
+/// The board has no bus-conflict protection: the 74HC161 that holds the
+/// bank latches the data bus while the ROM is also driving it, so the
+/// register sees the AND of the two. Games written for it write to an
+/// address whose ROM byte already equals the bank, for that reason.
+/// Same treatment as `Gxrom`, and the same for the same physical
+/// reason.
+///
+/// AUTHORED from the nesdev wiki's UxROM page. The bank register's
+/// power-on value is not defined by the part; it is 0 here, and the
+/// fixed high half is what a reset vector is read through either way.
+pub struct Uxrom {
+    prg: Vec<u8>,
+    chr_ram: Vec<u8>,
+    mirroring: Mirroring,
+    bank: u8,
+}
+
+impl Uxrom {
+    /// `prg` must be a whole number of 16 KiB banks, at least two, and
+    /// at most sixteen (256 KiB, UOROM's limit). The board carries CHR
+    /// RAM and nothing else: a CHR ROM image is refused by name rather
+    /// than quietly ignored.
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, mirroring: Mirroring) -> Result<Uxrom, String> {
+        if !prg.len().is_multiple_of(0x4000) || prg.len() < 0x8000 || prg.len() > 0x40000 {
+            return Err(format!("UxROM PRG must be 32 to 256 KiB in whole 16 KiB banks, got {} bytes", prg.len()));
+        }
+        if !chr.is_empty() {
+            return Err(format!("UxROM is a CHR RAM board; got {} bytes of CHR ROM", chr.len()));
+        }
+        Ok(Uxrom { prg, chr_ram: vec![0u8; 0x2000], mirroring, bank: 0 })
+    }
+
+    /// The bank register as last written.
+    pub fn bank(&self) -> u8 {
+        self.bank
+    }
+
+    fn prg_index(&self, a: u16) -> usize {
+        let banks = self.prg.len() / 0x4000;
+        let bank = if a < 0xc000 { self.bank as usize % banks } else { banks - 1 };
+        bank * 0x4000 + (a as usize & 0x3fff)
+    }
+}
+
+impl Cartridge for Uxrom {
+    fn cpu_read(&mut self, a: u16) -> Option<u8> {
+        (a >= 0x8000).then(|| self.prg[self.prg_index(a)])
+    }
+
+    fn cpu_write(&mut self, a: u16, v: u8) {
+        if a >= 0x8000 {
+            self.bank = v & self.prg[self.prg_index(a)];
+        }
+    }
+
+    fn chr_read(&mut self, a: u16) -> Option<u8> {
+        (a < 0x2000).then(|| self.chr_ram[a as usize])
+    }
+
+    fn chr_write(&mut self, a: u16, v: u8) {
+        if a < 0x2000 {
+            self.chr_ram[a as usize] = v;
+        }
+    }
+
+    fn ciram(&self, ppu_a: u16) -> (bool, bool) {
+        let a10 = match self.mirroring {
+            Mirroring::Vertical => ppu_a & 0x0400 != 0,
+            Mirroring::Horizontal => ppu_a & 0x0800 != 0,
+        };
+        (a10, ppu_a & 0x2000 == 0)
+    }
+
+    fn owns_chr_ram(&self) -> bool {
+        true
+    }
+}
+
+/// Mapper 3, CNROM: 16 or 32 KiB of PRG ROM, fixed, and 8 to 32 KiB of
+/// CHR ROM switched 8 KiB at a time by one write-only register anywhere
+/// in $8000-$FFFF. The mirroring solder option, no PRG RAM.
+///
+/// The latch is two bits wide on this board (the 74HC161's other two
+/// inputs are not wired), so a write of $07 selects bank 3, not bank 7.
+/// Bus conflicts as on UxROM and GxROM, and for the same reason.
+///
+/// AUTHORED from the nesdev wiki's CNROM page.
+pub struct Cnrom {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    mirroring: Mirroring,
+    bank: u8,
+}
+
+impl Cnrom {
+    /// `prg` must be 16 or 32 KiB; `chr` 8, 16 or 32 KiB.
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, mirroring: Mirroring) -> Result<Cnrom, String> {
+        match prg.len() {
+            0x4000 | 0x8000 => {}
+            n => return Err(format!("CNROM PRG must be 16 or 32 KiB, got {n} bytes")),
+        }
+        match chr.len() {
+            0x2000 | 0x4000 | 0x8000 => {}
+            n => return Err(format!("CNROM CHR must be 8, 16 or 32 KiB, got {n} bytes")),
+        }
+        Ok(Cnrom { prg, chr, mirroring, bank: 0 })
+    }
+
+    /// The CHR bank as last latched (two bits).
+    pub fn bank(&self) -> u8 {
+        self.bank
+    }
+}
+
+impl Cartridge for Cnrom {
+    fn cpu_read(&mut self, a: u16) -> Option<u8> {
+        (a >= 0x8000).then(|| self.prg[(a as usize - 0x8000) % self.prg.len()])
+    }
+
+    fn cpu_write(&mut self, a: u16, v: u8) {
+        if a >= 0x8000 {
+            let rom = self.prg[(a as usize - 0x8000) % self.prg.len()];
+            self.bank = (v & rom) & 0x03;
+        }
+    }
+
+    fn chr_read(&mut self, a: u16) -> Option<u8> {
+        (a < 0x2000).then(|| {
+            let banks = self.chr.len() / 0x2000;
+            self.chr[(self.bank as usize % banks) * 0x2000 + a as usize]
+        })
+    }
+
+    fn chr_write(&mut self, _a: u16, _v: u8) {
+        // CHR is ROM on CNROM.
+    }
+
+    fn ciram(&self, ppu_a: u16) -> (bool, bool) {
+        let a10 = match self.mirroring {
+            Mirroring::Vertical => ppu_a & 0x0400 != 0,
+            Mirroring::Horizontal => ppu_a & 0x0800 != 0,
+        };
+        (a10, ppu_a & 0x2000 == 0)
+    }
+}
+
+/// Two writes this many PPU dots apart or fewer are one pair to MMC1:
+/// the NES runs three dots to a CPU cycle, so writes on CONSECUTIVE
+/// cycles are three apart and anything further is a second write the
+/// serial port accepts.
+pub const MMC1_PAIR_DOTS: u64 = 3;
+
+/// How MMC1 drives CIRAM A10. The register has four modes where the
+/// solder options have two, so this board cannot say what it does in
+/// [`Mirroring`] and keeps its own.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Mmc1Mirroring {
+    /// One nametable, the lower: CIRAM A10 held low.
+    OneScreenLower,
+    /// One nametable, the upper: CIRAM A10 held high.
+    OneScreenUpper,
+    /// CIRAM A10 = PPU A10, as the vertical solder option.
+    Vertical,
+    /// CIRAM A10 = PPU A11, as the horizontal solder option.
+    Horizontal,
+}
+
+/// Mapper 1, MMC1 (the SxROM boards): up to 256 KiB of PRG ROM in 16 KiB
+/// banks either half of the window at a time, CHR ROM or CHR RAM in 4 or
+/// 8 KiB banks, four mirroring modes under software, and 8 KiB of PRG
+/// RAM at $6000 with an enable bit.
+///
+/// The part has no parallel register file. Every write to $8000-$FFFF
+/// carries ONE bit, the value's bit 0, into a five-bit shift register
+/// from the top; the fifth write commits the whole five bits to the
+/// register the ADDRESS of that fifth write selects. A write with bit 7
+/// set instead clears the shift register and ORs the control register
+/// with $0C, which is what puts the last bank at $C000 and is how a
+/// game gets back to a known state. The four registers:
+///
+/// - $8000-$9FFF control: bits 0-1 mirroring, 2-3 the PRG mode,
+///   4 the CHR mode (0: one 8 KiB bank, 1: two 4 KiB banks).
+/// - $A000-$BFFF the CHR bank at PPU $0000 (its low bit ignored in the
+///   8 KiB mode).
+/// - $C000-$DFFF the CHR bank at PPU $1000 (unused in the 8 KiB mode).
+/// - $E000-$FFFF bits 0-3 the PRG bank, bit 4 the PRG RAM's enable,
+///   which is ACTIVE LOW: set means the RAM is off.
+///
+/// **Two writes on consecutive CPU cycles are one write.** The part's
+/// serial port ignores the second, which is what makes an `INC $8000`
+/// or a `DEC` on the window shift one bit and not two. `cpu_write_at`
+/// carries the dot that decides it; `cpu_write` has no time and is
+/// always accepted.
+///
+/// AUTHORED from the nesdev wiki's MMC1 page. The power-on value of the
+/// registers is not defined by the part beyond the control register's
+/// PRG mode: this board powers up with control $0C (the last bank fixed
+/// at $C000, one-screen lower), which is the state a reset write leaves
+/// and the one every SxROM game's reset code is written against.
+/// SUROM's use of a CHR bit as PRG A18 is out of scope and 512 KiB is
+/// refused by name rather than banked wrongly.
+pub struct Mmc1 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    chr_is_ram: bool,
+    prg_ram: Vec<u8>,
+    /// The serial port: the bits so far, from bit 0 up, and how many.
+    shift: u8,
+    count: u8,
+    control: u8,
+    chr0: u8,
+    chr1: u8,
+    prg_bank: u8,
+    /// The dot of the last write the port accepted, so the next one can
+    /// be told whether it is the same instruction's second.
+    last_write_dot: Option<u64>,
+    /// Test-only: the pair rule taken out, so a test that claims it is
+    /// what makes an RMW shift once can be made to fail.
+    pair_dots: u64,
+}
+
+impl Mmc1 {
+    /// `prg` must be a whole number of 16 KiB banks, at least two and at
+    /// most sixteen; `chr` a whole number of 4 KiB banks, or empty for
+    /// the 8 KiB CHR RAM board. The header's mirroring is taken and
+    /// ignored: on this board mirroring is a register, and the
+    /// constructor keeps the argument only so every board is built the
+    /// same way.
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, _mirroring: Mirroring) -> Result<Mmc1, String> {
+        if !prg.len().is_multiple_of(0x4000) || prg.len() < 0x8000 {
+            return Err(format!("MMC1 PRG must be a whole number of 16 KiB banks, at least 32 KiB, got {} bytes", prg.len()));
+        }
+        if prg.len() > 0x40000 {
+            return Err(format!("MMC1 PRG over 256 KiB is SUROM, which banks through a CHR bit and is out of scope; got {} bytes", prg.len()));
+        }
+        if !chr.is_empty() && !chr.len().is_multiple_of(0x1000) {
+            return Err(format!("MMC1 CHR must be a whole number of 4 KiB banks, or empty for the CHR RAM board, got {} bytes", chr.len()));
+        }
+        let chr_is_ram = chr.is_empty();
+        let chr = if chr_is_ram { vec![0u8; 0x2000] } else { chr };
+        Ok(Mmc1 {
+            prg,
+            chr,
+            chr_is_ram,
+            prg_ram: vec![0u8; 0x2000],
+            shift: 0,
+            count: 0,
+            // The reset state: PRG mode 3, the last bank fixed at $C000.
+            control: 0x0c,
+            chr0: 0,
+            chr1: 0,
+            prg_bank: 0,
+            last_write_dot: None,
+            pair_dots: MMC1_PAIR_DOTS,
+        })
+    }
+
+    /// Test-only: the same board with the consecutive-write rule taken
+    /// out, so an RMW on the window shifts twice and the test that says
+    /// it must not can be made to fail.
+    pub fn without_the_pair_rule_for_proof(mut self) -> Mmc1 {
+        self.pair_dots = 0;
+        self
+    }
+
+    /// The four registers as last committed: (control, chr0, chr1, prg).
+    pub fn registers(&self) -> (u8, u8, u8, u8) {
+        (self.control, self.chr0, self.chr1, self.prg_bank)
+    }
+
+    /// The serial port mid-word: the bits so far and how many, which is
+    /// what a test of the pair rule reads.
+    pub fn shift_state(&self) -> (u8, u8) {
+        (self.shift, self.count)
+    }
+
+    /// How the board drives CIRAM A10, from the control register.
+    pub fn mirroring(&self) -> Mmc1Mirroring {
+        match self.control & 3 {
+            0 => Mmc1Mirroring::OneScreenLower,
+            1 => Mmc1Mirroring::OneScreenUpper,
+            2 => Mmc1Mirroring::Vertical,
+            _ => Mmc1Mirroring::Horizontal,
+        }
+    }
+
+    /// True while the PRG RAM answers at $6000. The enable bit is active
+    /// low: bit 4 of the PRG register SET means the RAM is off.
+    pub fn prg_ram_enabled(&self) -> bool {
+        self.prg_bank & 0x10 == 0
+    }
+
+    /// Which 16 KiB PRG bank answers at `a`, as an index into `prg`.
+    fn prg_index(&self, a: u16) -> usize {
+        let banks = self.prg.len() / 0x4000;
+        let sel = (self.prg_bank & 0x0f) as usize;
+        let low = a < 0xc000;
+        let bank = match (self.control >> 2) & 3 {
+            // 0 and 1: one 32 KiB bank, the selection's low bit ignored.
+            0 | 1 => (sel & !1) + usize::from(!low),
+            // 2: the FIRST bank fixed at $8000, switch at $C000.
+            2 => {
+                if low {
+                    0
+                } else {
+                    sel
+                }
+            }
+            // 3: switch at $8000, the LAST bank fixed at $C000.
+            _ => {
+                if low {
+                    sel
+                } else {
+                    banks - 1
+                }
+            }
+        };
+        (bank % banks) * 0x4000 + (a as usize & 0x3fff)
+    }
+
+    /// Which 4 KiB CHR bank answers at `a`, as an index into `chr`.
+    fn chr_index(&self, a: u16) -> usize {
+        let banks = self.chr.len() / 0x1000;
+        let half = a & 0x1000 != 0;
+        let bank = if self.control & 0x10 == 0 {
+            // One 8 KiB bank: chr0's low bit is ignored and the halves
+            // follow each other.
+            (self.chr0 & !1) as usize + usize::from(half)
+        } else if half {
+            self.chr1 as usize
+        } else {
+            self.chr0 as usize
+        };
+        (bank % banks) * 0x1000 + (a as usize & 0x0fff)
+    }
+
+    /// One accepted write to the serial port.
+    fn serial(&mut self, a: u16, v: u8) {
+        if v & 0x80 != 0 {
+            // The reset write: the port is cleared and the control
+            // register's PRG mode forced to 3. Nothing else moves.
+            self.shift = 0;
+            self.count = 0;
+            self.control |= 0x0c;
+            return;
+        }
+        self.shift |= (v & 1) << self.count;
+        self.count += 1;
+        if self.count < 5 {
+            return;
+        }
+        let word = self.shift & 0x1f;
+        self.shift = 0;
+        self.count = 0;
+        // The FIFTH write's address picks the register.
+        match (a >> 13) & 3 {
+            0 => self.control = word,
+            1 => self.chr0 = word,
+            2 => self.chr1 = word,
+            _ => self.prg_bank = word,
+        }
+    }
+}
+
+impl Cartridge for Mmc1 {
+    fn cpu_read(&mut self, a: u16) -> Option<u8> {
+        if (0x6000..0x8000).contains(&a) {
+            return self.prg_ram_enabled().then(|| self.prg_ram[(a - 0x6000) as usize]);
+        }
+        (a >= 0x8000).then(|| self.prg[self.prg_index(a)])
+    }
+
+    fn cpu_write(&mut self, a: u16, v: u8) {
+        if (0x6000..0x8000).contains(&a) {
+            if self.prg_ram_enabled() {
+                self.prg_ram[(a - 0x6000) as usize] = v;
+            }
+            return;
+        }
+        if a >= 0x8000 {
+            self.serial(a, v);
+        }
+    }
+
+    fn cpu_write_at(&mut self, a: u16, v: u8, dot: u64) {
+        if a >= 0x8000 {
+            // The second write of a pair on consecutive CPU cycles never
+            // reaches the port, and does not restart the count either.
+            if let Some(last) = self.last_write_dot {
+                if dot.saturating_sub(last) <= self.pair_dots {
+                    self.last_write_dot = Some(dot);
+                    return;
+                }
+            }
+            self.last_write_dot = Some(dot);
+        }
+        self.cpu_write(a, v);
+    }
+
+    fn chr_read(&mut self, a: u16) -> Option<u8> {
+        (a < 0x2000).then(|| self.chr[self.chr_index(a)])
+    }
+
+    fn chr_write(&mut self, a: u16, v: u8) {
+        if a < 0x2000 && self.chr_is_ram {
+            let i = self.chr_index(a);
+            self.chr[i] = v;
+        }
+    }
+
+    fn ciram(&self, ppu_a: u16) -> (bool, bool) {
+        let a10 = match self.mirroring() {
+            Mmc1Mirroring::OneScreenLower => false,
+            Mmc1Mirroring::OneScreenUpper => true,
+            Mmc1Mirroring::Vertical => ppu_a & 0x0400 != 0,
+            Mmc1Mirroring::Horizontal => ppu_a & 0x0800 != 0,
+        };
+        (a10, ppu_a & 0x2000 == 0)
     }
 
     fn owns_chr_ram(&self) -> bool {
