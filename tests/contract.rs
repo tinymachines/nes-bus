@@ -3,7 +3,7 @@
 //! the N0 gate (ntsc-crt and 2c02 compiling against these types with
 //! their goldens unchanged) lives in those repos' own suites.
 
-use nes_bus::cart::{CartEdge, Cartridge, Cnrom, Gxrom, Mirroring, Mmc1, Mmc1Mirroring, Mmc3, Nrom, Uxrom, CART_PINS, A12_FILTER_DOTS};
+use nes_bus::cart::{CartEdge, Cartridge, Cnrom, Gxrom, Mirroring, Mmc1, Mmc1Mirroring, Mmc2, Mmc3, Nrom, Uxrom, CART_PINS, A12_FILTER_DOTS};
 use nes_bus::pins::{CpuPins, PpuPins, CPU_PINS, PPU_PINS};
 use nes_bus::{DotFrame, FrameParity, ACTIVE_DOTS, ACTIVE_ROWS, DOTS_PER_LINE, LINES};
 
@@ -558,4 +558,98 @@ fn mmc1_ignores_the_second_write_of_a_pair_on_consecutive_cycles() {
     let mut m = build().without_the_pair_rule_for_proof();
     rmw(&mut m, 100, 1);
     assert_eq!(m.shift_state(), (0b11, 2), "without the rule the RMW shifts twice");
+}
+
+/// MMC2's PRG window moves and its three fixed banks do not.
+#[test]
+fn mmc2_switches_one_eighth_of_the_window_and_fixes_the_last_three() {
+    let mut prg = vec![0u8; 16 * 0x2000];
+    for (i, b) in prg.chunks_mut(0x2000).enumerate() {
+        b.fill(i as u8);
+    }
+    let mut c = Mmc2::new(prg, vec![0u8; 0x2000], Mirroring::Vertical).unwrap();
+    assert_eq!(c.cpu_read(0x8000), Some(0), "power-on: bank 0 in the window");
+    assert_eq!(c.cpu_read(0xa000), Some(13), "the third-from-last is fixed at $A000");
+    assert_eq!(c.cpu_read(0xc000), Some(14));
+    assert_eq!(c.cpu_read(0xe000), Some(15), "and the last at $E000");
+    c.cpu_write(0xa123, 0x05); // the PRG register, anywhere in $Axxx
+    assert_eq!(c.banks().0, 5);
+    assert_eq!(c.cpu_read(0x8000), Some(5), "the window moved");
+    assert_eq!(c.cpu_read(0xa000), Some(13), "the fixed banks did not");
+    assert_eq!(c.cpu_read(0xe000), Some(15));
+    // $8000..$9FFF is the window, not a register: a write there is not
+    // a bank select on this board.
+    c.cpu_write(0x9000, 0x02);
+    assert_eq!(c.banks().0, 5);
+    assert_eq!(c.cpu_read(0x7fff), None, "and nothing below the window is the board's");
+    assert!(Mmc2::new(vec![0; 0x4000], vec![0; 0x2000], Mirroring::Vertical).is_err());
+    assert!(Mmc2::new(vec![0; 0x8000], Vec::new(), Mirroring::Vertical).is_err());
+}
+
+/// The CHR bank is chosen by a latch the PPU's own fetches flip, and the
+/// byte the triggering fetch returns comes from the bank the latch chose
+/// BEFORE it. Each half of the pattern table has its own latch and its
+/// own pair of registers.
+#[test]
+fn mmc2s_latches_are_flipped_by_the_ppus_fetches_after_the_byte_is_read() {
+    let mut chr = vec![0u8; 32 * 0x1000];
+    for (i, b) in chr.chunks_mut(0x1000).enumerate() {
+        b.fill(0x10 + i as u8);
+    }
+    let mut c = Mmc2::new(vec![0u8; 0x8000], chr, Mirroring::Vertical).unwrap();
+    // Four different banks, one per (half, latch).
+    c.cpu_write(0xb000, 1); // $0000 while latch 0 is $FD
+    c.cpu_write(0xc000, 2); // $0000 while it is $FE
+    c.cpu_write(0xd000, 3); // $1000 while latch 1 is $FD
+    c.cpu_write(0xe000, 4); // $1000 while it is $FE
+    assert_eq!(c.banks(), (0, [1, 3], [2, 4]));
+    assert_eq!(c.latches(), [0xfd, 0xfd], "power-on: both on $FD");
+    assert_eq!(c.chr_read(0x0000), Some(0x11), "the low half on its $FD bank");
+    assert_eq!(c.chr_read(0x1000), Some(0x13), "the high half on its own");
+
+    // The trigger for the low half is exactly $0FD8 and $0FE8. Reading
+    // $0FE8 returns the $FD bank's byte and leaves the latch on $FE.
+    assert_eq!(c.chr_read(0x0fe8), Some(0x11), "the byte comes from the bank the OLD latch chose");
+    assert_eq!(c.latches()[0], 0xfe, "and the latch is left on $FE");
+    assert_eq!(c.chr_read(0x0000), Some(0x12), "so the next read is the $FE bank's");
+    assert_eq!(c.chr_read(0x1000), Some(0x13), "the other half is untouched");
+    assert_eq!(c.chr_read(0x0fd8), Some(0x12), "and back the same way");
+    assert_eq!(c.latches()[0], 0xfd);
+    assert_eq!(c.chr_read(0x0000), Some(0x11));
+
+    // The high half's triggers are RUNS of eight, not single addresses.
+    assert_eq!(c.chr_read(0x1fef), Some(0x13), "the last of the $FE run");
+    assert_eq!(c.latches()[1], 0xfe);
+    assert_eq!(c.chr_read(0x1000), Some(0x14));
+    assert_eq!(c.chr_read(0x1fdb), Some(0x14), "and inside the $FD run");
+    assert_eq!(c.latches()[1], 0xfd);
+    assert_eq!(c.chr_read(0x1000), Some(0x13));
+
+    // The asymmetry, stated as a difference: the address one past the
+    // low half's trigger does nothing, where the same offset in the high
+    // half's run does.
+    c.chr_read(0x0fd9);
+    assert_eq!(c.latches()[0], 0xfd, "$0FD9 is not a trigger");
+    c.chr_read(0x0fe9);
+    assert_eq!(c.latches()[0], 0xfd, "nor is $0FE9");
+    c.chr_read(0x1fd9);
+    assert_eq!(c.latches()[1], 0xfd);
+    c.chr_read(0x1fe9);
+    assert_eq!(c.latches()[1], 0xfe, "$1FE9 is, because the high half's trigger is a run");
+
+    assert_eq!(c.chr_read(0x2000), None, "the board answers below $2000 only");
+    assert!(!c.owns_chr_ram());
+}
+
+/// MMC2's mirroring register, at the pin.
+#[test]
+fn mmc2_drives_ciram_from_its_register() {
+    let mut c = Mmc2::new(vec![0u8; 0x8000], vec![0u8; 0x2000], Mirroring::Horizontal).unwrap();
+    c.cpu_write(0xf000, 0);
+    assert_eq!(c.ciram(0x2400), (true, false), "bit 0 clear puts CIRAM A10 on PPU A10");
+    assert_eq!(c.ciram(0x2800), (false, false));
+    c.cpu_write(0xffff, 1);
+    assert_eq!(c.ciram(0x2400), (false, false), "bit 0 set puts it on PPU A11");
+    assert_eq!(c.ciram(0x2800), (true, false));
+    assert!(c.ciram(0x1000).1, "/CE follows PPU A13 either way");
 }

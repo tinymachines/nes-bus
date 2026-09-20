@@ -1124,3 +1124,164 @@ impl Cartridge for Mmc1 {
         self.chr_is_ram
     }
 }
+
+/// Mapper 9, MMC2 (the PxROM boards): 128 KiB of PRG ROM with one 8 KiB
+/// window switched and the last three banks fixed, CHR ROM in 4 KiB
+/// banks, and mirroring under software. One cartridge on this desk is
+/// this board and it is the only one: Mike Tyson's Punch-Out.
+///
+/// What makes it unlike every other board here is that the CHR bank is
+/// not chosen by the CPU. Each half of the pattern table has TWO bank
+/// registers and a latch that says which of them answers, and the latch
+/// is flipped by the PPU's own fetches: the chip watches the address
+/// bus, and a read of a particular tile sets the latch for every read
+/// after it. That is how Little Mac's face changes size without the
+/// program writing a register mid-frame: the tile that draws the top of
+/// his head is also the switch.
+///
+/// The registers, decoded on A12 to A15 alone (so every address in a
+/// 4 KiB block writes the same one):
+///
+/// - `$A000-$AFFF` the PRG bank at $8000, four bits.
+/// - `$B000-$BFFF` the CHR bank at PPU $0000 while latch 0 says $FD.
+/// - `$C000-$CFFF` the same while it says $FE.
+/// - `$D000-$DFFF` the CHR bank at PPU $1000 while latch 1 says $FD.
+/// - `$E000-$EFFF` the same while it says $FE.
+/// - `$F000-$FFFF` mirroring, bit 0.
+///
+/// AUTHORED from the nesdev wiki's MMC2 page. Three things there are
+/// easy to half-remember and all three are load-bearing:
+///
+/// - **The latch changes AFTER the read that trips it.** The byte the
+///   triggering fetch returns comes from the bank the OLD latch chose.
+/// - **The two latches are not triggered alike.** Latch 0 answers to
+///   exactly $0FD8 and $0FE8; latch 1 answers to the whole of
+///   $1FD8-$1FDF and $1FE8-$1FEF. The asymmetry is the part's, not a
+///   simplification here, and `Mmc2::triggers` is where it lives.
+/// - **The mirroring bit is read by the pin it drives, not by the
+///   adjective.** Bit 0 clear puts CIRAM A10 on PPU A10, which is what
+///   [`Mirroring::Vertical`] means in this crate.
+///
+/// The power-on latch is not defined by the part; both start on $FD
+/// here, and a game sets them within a frame of turning rendering on.
+pub struct Mmc2 {
+    prg: Vec<u8>,
+    chr: Vec<u8>,
+    prg_bank: u8,
+    /// The $FD and $FE bank for each half of the pattern table.
+    chr_fd: [u8; 2],
+    chr_fe: [u8; 2],
+    /// Which of the two each half is on: false is $FD, true is $FE.
+    latch: [bool; 2],
+    mirroring: Mirroring,
+}
+
+impl Mmc2 {
+    /// `prg` must be a whole number of 8 KiB banks, at least four;
+    /// `chr` a whole number of 4 KiB banks. This board carries CHR ROM
+    /// and a CHR RAM image is refused by name: with no ROM to watch,
+    /// the latch would have nothing to switch between.
+    pub fn new(prg: Vec<u8>, chr: Vec<u8>, mirroring: Mirroring) -> Result<Mmc2, String> {
+        if !prg.len().is_multiple_of(0x2000) || prg.len() < 0x8000 {
+            return Err(format!("MMC2 PRG must be a whole number of 8 KiB banks, at least 32 KiB, got {} bytes", prg.len()));
+        }
+        if chr.is_empty() || !chr.len().is_multiple_of(0x1000) {
+            return Err(format!("MMC2 CHR must be a whole number of 4 KiB banks of ROM, got {} bytes", chr.len()));
+        }
+        Ok(Mmc2 { prg, chr, prg_bank: 0, chr_fd: [0; 2], chr_fe: [0; 2], latch: [false; 2], mirroring })
+    }
+
+    /// The bank registers as last written: (PRG, the two $FD, the two
+    /// $FE).
+    pub fn banks(&self) -> (u8, [u8; 2], [u8; 2]) {
+        (self.prg_bank, self.chr_fd, self.chr_fe)
+    }
+
+    /// Which tile each half is on, as the part's two latches stand:
+    /// $fd or $fe, the names the registers carry.
+    pub fn latches(&self) -> [u8; 2] {
+        [if self.latch[0] { 0xfe } else { 0xfd }, if self.latch[1] { 0xfe } else { 0xfd }]
+    }
+
+    /// What a PPU address does to the latches, or nothing. Separated out
+    /// because the two halves are not triggered alike and a reader will
+    /// not believe it otherwise: the low half answers to two exact
+    /// addresses, the high half to two runs of eight.
+    fn triggers(a: u16) -> Option<(usize, bool)> {
+        match a {
+            0x0fd8 => Some((0, false)),
+            0x0fe8 => Some((0, true)),
+            0x1fd8..=0x1fdf => Some((1, false)),
+            0x1fe8..=0x1fef => Some((1, true)),
+            _ => None,
+        }
+    }
+
+    /// Which 8 KiB PRG bank answers at `a`. The window at $8000 moves;
+    /// $A000, $C000 and $E000 are the last three banks and never do.
+    fn prg_index(&self, a: u16) -> usize {
+        let banks = self.prg.len() / 0x2000;
+        let bank = match (a >> 13) & 3 {
+            0 => self.prg_bank as usize % banks,
+            n => banks - 4 + n as usize,
+        };
+        bank * 0x2000 + (a as usize & 0x1fff)
+    }
+
+    /// Which 4 KiB CHR bank answers at `a`, as the latches stand.
+    fn chr_index(&self, a: u16) -> usize {
+        let half = ((a >> 12) & 1) as usize;
+        let bank = if self.latch[half] { self.chr_fe[half] } else { self.chr_fd[half] };
+        let banks = self.chr.len() / 0x1000;
+        (bank as usize % banks) * 0x1000 + (a as usize & 0x0fff)
+    }
+}
+
+impl Cartridge for Mmc2 {
+    fn cpu_read(&mut self, a: u16) -> Option<u8> {
+        (a >= 0x8000).then(|| self.prg[self.prg_index(a)])
+    }
+
+    fn cpu_write(&mut self, a: u16, v: u8) {
+        if a < 0xa000 {
+            // $8000-$9FFF is the switched window and nothing else: the
+            // part decodes its registers from $A000 up.
+            return;
+        }
+        match (a >> 12) & 0x0f {
+            0x0a => self.prg_bank = v & 0x0f,
+            0x0b => self.chr_fd[0] = v & 0x1f,
+            0x0c => self.chr_fe[0] = v & 0x1f,
+            0x0d => self.chr_fd[1] = v & 0x1f,
+            0x0e => self.chr_fe[1] = v & 0x1f,
+            _ => {
+                self.mirroring = if v & 1 == 0 { Mirroring::Vertical } else { Mirroring::Horizontal };
+            }
+        }
+    }
+
+    fn chr_read(&mut self, a: u16) -> Option<u8> {
+        if a >= 0x2000 {
+            return None;
+        }
+        // The byte first, from the bank the latch chooses NOW; the
+        // trigger is for the reads after this one.
+        let out = self.chr[self.chr_index(a)];
+        if let Some((half, to)) = Mmc2::triggers(a) {
+            self.latch[half] = to;
+        }
+        Some(out)
+    }
+
+    fn chr_write(&mut self, _a: u16, _v: u8) {
+        // CHR is ROM on this board.
+    }
+
+    fn ciram(&self, ppu_a: u16) -> (bool, bool) {
+        let a10 = match self.mirroring {
+            Mirroring::Vertical => ppu_a & 0x0400 != 0,
+            Mirroring::Horizontal => ppu_a & 0x0800 != 0,
+        };
+        (a10, ppu_a & 0x2000 == 0)
+    }
+}
