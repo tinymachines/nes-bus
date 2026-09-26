@@ -205,6 +205,16 @@ pub trait Cartridge {
     fn owns_chr_ram(&self) -> bool {
         false
     }
+
+    /// Where in the PRG ROM a CPU read at `a` would land, with the banks
+    /// as they stand, and with no side effect: an offset into the file's
+    /// PRG, or None where the ROM does not answer (RAM, open bus, or a
+    /// board that has not said). A debugger keys code to this rather than
+    /// to the CPU address, because on a banked board one address is many
+    /// places in the ROM. The default says nothing.
+    fn prg_offset(&self, _a: u16) -> Option<usize> {
+        None
+    }
 }
 
 /// Mapper 0: 16 KiB (mirrored) or 32 KiB PRG ROM, 8 KiB CHR ROM, the
@@ -233,6 +243,10 @@ impl Nrom {
 }
 
 impl Cartridge for Nrom {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| (a as usize - 0x8000) % self.prg.len())
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         if a >= 0x8000 {
             Some(self.prg[(a as usize - 0x8000) % self.prg.len()])
@@ -313,6 +327,10 @@ impl Gxrom {
 }
 
 impl Cartridge for Gxrom {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| self.prg_index(a))
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         if a >= 0x8000 {
             Some(self.prg[self.prg_index(a)])
@@ -628,6 +646,10 @@ impl Mmc3 {
 }
 
 impl Cartridge for Mmc3 {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| self.prg_bank(a))
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         if (0x6000..0x8000).contains(&a) {
             return self.prg_ram_enable.then(|| self.prg_ram[(a - 0x6000) as usize]);
@@ -765,6 +787,10 @@ impl Uxrom {
 }
 
 impl Cartridge for Uxrom {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| self.prg_index(a))
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         (a >= 0x8000).then(|| self.prg[self.prg_index(a)])
     }
@@ -835,6 +861,10 @@ impl Cnrom {
 }
 
 impl Cartridge for Cnrom {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| (a as usize - 0x8000) % self.prg.len())
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         (a >= 0x8000).then(|| self.prg[(a as usize - 0x8000) % self.prg.len()])
     }
@@ -1085,6 +1115,10 @@ impl Mmc1 {
 }
 
 impl Cartridge for Mmc1 {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| self.prg_index(a))
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         if (0x6000..0x8000).contains(&a) {
             return self.prg_ram_enabled().then(|| self.prg_ram[(a - 0x6000) as usize]);
@@ -1258,6 +1292,10 @@ impl Mmc2 {
 }
 
 impl Cartridge for Mmc2 {
+    fn prg_offset(&self, a: u16) -> Option<usize> {
+        (a >= 0x8000).then(|| self.prg_index(a))
+    }
+
     fn cpu_read(&mut self, a: u16) -> Option<u8> {
         (a >= 0x8000).then(|| self.prg[self.prg_index(a)])
     }
