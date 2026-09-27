@@ -52,6 +52,7 @@ pub mod pins;
 /// parity and the encoder consumes it, so it is a bus fact, not a grid
 /// fact.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub enum FrameParity {
     Even,
     OddFull,
@@ -73,6 +74,7 @@ pub const ACTIVE_ROWS: usize = 240;
 /// ladder produces it and the encoder consumes it, so it is the waist of
 /// the whole video path and neither side may own it.
 #[derive(Clone, Debug)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct DotFrame {
     pub parity: FrameParity,
     pub colour: Vec<u8>,

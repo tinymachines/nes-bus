@@ -1,9 +1,22 @@
 [package]
 name = "nes-bus"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 license = "MIT"
 description = "The NES console's inter-chip contracts in one dependency-free crate: the 2A03 and 2C02 pin frames, the 72-pin cartridge edge, the cartridge trait with NROM, GxROM and MMC3, the PPU's DotFrame, and the audio sample stream."
 repository = "https://github.com/tinymachines/nes-bus"
 
+[features]
+# Saved states: the boards' registers and RAM, the DotFrame and the enums
+# they hold as serde data, for a console to save and restore. Off by
+# default, so the crate as the contract is still dependency-free.
+state = ["dep:serde"]
+
 [dependencies]
+serde = { version = "1", features = ["derive"], optional = true }
+
+[dev-dependencies]
+# The suite always builds with saved states, so tests/state.rs is never
+# compiled out of a run that then reports it passed.
+nes-bus = { path = ".", features = ["state"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }

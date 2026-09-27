@@ -140,6 +140,7 @@ pub const CART_PINS: [(u8, &str); 72] = [
 
 /// Nametable mirroring, the NROM solder option.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub enum Mirroring {
     /// CIRAM A10 = PPU A10: nametables side by side.
     Vertical,
@@ -215,12 +216,155 @@ pub trait Cartridge {
     fn prg_offset(&self, _a: u16) -> Option<usize> {
         None
     }
+
+    /// The board's saved state (feature `state`): its registers and RAM,
+    /// never its ROM, which the console already has. None for a board
+    /// that cannot say, which a console must refuse to save rather than
+    /// save without it.
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        None
+    }
+
+    /// Back to a saved state, on the same board with the same ROM. A
+    /// state from another board or another shape is refused and changes
+    /// nothing.
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, _st: &CartState) -> Result<(), String> {
+        Err("this board keeps no saved state".into())
+    }
 }
+
+/// A board's saved state: the board itself with its ROM left out (the
+/// vectors that hold ROM are empty), so every register and every byte of
+/// RAM it has is in it without a list of fields to keep up to date.
+#[cfg(feature = "state")]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub enum CartState {
+    Nrom(Nrom),
+    Gxrom(Gxrom),
+    Mmc3(Mmc3),
+    Uxrom(Uxrom),
+    Cnrom(Cnrom),
+    Mmc1(Mmc1),
+    Mmc2(Mmc2),
+}
+
+#[cfg(feature = "state")]
+impl CartState {
+    fn board(&self) -> &'static str {
+        match self {
+            CartState::Nrom(_) => "NROM",
+            CartState::Gxrom(_) => "GxROM",
+            CartState::Mmc3(_) => "MMC3",
+            CartState::Uxrom(_) => "UxROM",
+            CartState::Cnrom(_) => "CNROM",
+            CartState::Mmc1(_) => "MMC1",
+            CartState::Mmc2(_) => "MMC2",
+        }
+    }
+}
+
+#[cfg(feature = "state")]
+fn other_board(st: &CartState, this: &str) -> String {
+    format!("a state saved on {} cannot load into {this}", st.board())
+}
+
+#[cfg(feature = "state")]
+fn same_len(what: &str, saved: usize, here: usize) -> Result<(), String> {
+    if saved == here {
+        Ok(())
+    } else {
+        Err(format!("the state's {what} is {saved} bytes and this board's is {here}"))
+    }
+}
+
+/// One board's save and load: `$rom` names the fields that hold ROM,
+/// which the state leaves empty and a load keeps; `$check` refuses a
+/// state whose RAM is another shape before anything changes.
+#[cfg(feature = "state")]
+macro_rules! board_state {
+    ($ty:ident, $name:literal, [$($rom:ident),*], |$b:ident, $me:ident| $check:block) => {
+        #[cfg(feature = "state")]
+        impl $ty {
+            fn save_board(&self) -> CartState {
+                let mut b = self.clone();
+                $(b.$rom = Vec::new();)*
+                CartState::$ty(b)
+            }
+            fn load_board(&mut self, st: &CartState) -> Result<(), String> {
+                let CartState::$ty(saved) = st else { return Err(other_board(st, $name)) };
+                {
+                    let $b: &$ty = saved;
+                    let $me: &$ty = self;
+                    $check
+                }
+                let mut next = saved.clone();
+                $(next.$rom = std::mem::take(&mut self.$rom);)*
+                *self = next;
+                Ok(())
+            }
+        }
+    };
+}
+
+#[cfg(feature = "state")]
+board_state!(Nrom, "NROM", [prg, chr], |_b, _me| { });
+#[cfg(feature = "state")]
+board_state!(Gxrom, "GxROM", [prg, chr], |_b, _me| { });
+#[cfg(feature = "state")]
+board_state!(Cnrom, "CNROM", [prg, chr], |_b, _me| { });
+#[cfg(feature = "state")]
+board_state!(Mmc2, "MMC2", [prg, chr], |_b, _me| { });
+/// MMC3 and MMC1 carry CHR ROM or CHR RAM by what the cartridge had: RAM
+/// is state, ROM is not.
+#[cfg(feature = "state")]
+macro_rules! board_state_chr {
+    ($ty:ident, $name:literal) => {
+        #[cfg(feature = "state")]
+        impl $ty {
+            fn save_board(&self) -> CartState {
+                let mut b = self.clone();
+                b.prg = Vec::new();
+                if !b.chr_is_ram {
+                    b.chr = Vec::new();
+                }
+                CartState::$ty(b)
+            }
+            fn load_board(&mut self, st: &CartState) -> Result<(), String> {
+                let CartState::$ty(saved) = st else { return Err(other_board(st, $name)) };
+                if saved.chr_is_ram != self.chr_is_ram {
+                    return Err("the state's CHR is RAM where this cartridge's is ROM, or the other way".into());
+                }
+                if self.chr_is_ram {
+                    same_len("CHR RAM", saved.chr.len(), self.chr.len())?;
+                }
+                same_len("PRG RAM", saved.prg_ram.len(), self.prg_ram.len())?;
+                let mut next = saved.clone();
+                next.prg = std::mem::take(&mut self.prg);
+                if !self.chr_is_ram {
+                    next.chr = std::mem::take(&mut self.chr);
+                }
+                *self = next;
+                Ok(())
+            }
+        }
+    };
+}
+
+#[cfg(feature = "state")]
+board_state_chr!(Mmc3, "MMC3");
+#[cfg(feature = "state")]
+board_state_chr!(Mmc1, "MMC1");
+#[cfg(feature = "state")]
+board_state!(Uxrom, "UxROM", [prg], |b, me| { same_len("CHR RAM", b.chr_ram.len(), me.chr_ram.len())?; });
 
 /// Mapper 0: 16 KiB (mirrored) or 32 KiB PRG ROM, 8 KiB CHR ROM, the
 /// mirroring solder option, no PRG RAM (the Family BASIC variant is out
 /// of scope). The one other board here is `Gxrom`, mapper 66, added
 /// 2026-09-12 because the bench's cartridge is one.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Nrom {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -243,6 +387,14 @@ impl Nrom {
 }
 
 impl Cartridge for Nrom {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| (a as usize - 0x8000) % self.prg.len())
     }
@@ -293,6 +445,8 @@ impl Cartridge for Nrom {
 ///
 /// AUTHORED: the register's power-on value is not defined by the part; it
 /// is 0 here (bank 0 of each), and nothing measured says otherwise yet.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Gxrom {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -327,6 +481,14 @@ impl Gxrom {
 }
 
 impl Cartridge for Gxrom {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| self.prg_index(a))
     }
@@ -421,6 +583,7 @@ pub const A12_FILTER_DOTS: u64 = 10;
 /// for two dots at a time. That is what the filter is for, and what
 /// makes a test of it able to fail.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct A12Watcher {
     last_a12: bool,
     low_since: u64,
@@ -490,6 +653,8 @@ impl A12Watcher {
 /// line. The NEC MMC3A asserts on the 1 to 0 transition instead and goes
 /// quiet with a latch of 0; blargg's `5.MMC3_rev_A` and `6.MMC3_rev_B`
 /// are the two ROMs that tell them apart.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mmc3 {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -646,6 +811,20 @@ impl Mmc3 {
 }
 
 impl Cartridge for Mmc3 {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)?;
+        // MUTATE_STATE=1 loses the scanline counter, and tests/state.rs
+        // must go red.
+        if std::env::var_os("MUTATE_STATE").is_some() {
+            self.irq_counter = 0;
+        }
+        Ok(())
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| self.prg_bank(a))
     }
@@ -752,6 +931,8 @@ impl Cartridge for Mmc3 {
 /// AUTHORED from the nesdev wiki's UxROM page. The bank register's
 /// power-on value is not defined by the part; it is 0 here, and the
 /// fixed high half is what a reset vector is read through either way.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Uxrom {
     prg: Vec<u8>,
     chr_ram: Vec<u8>,
@@ -787,6 +968,14 @@ impl Uxrom {
 }
 
 impl Cartridge for Uxrom {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| self.prg_index(a))
     }
@@ -833,6 +1022,8 @@ impl Cartridge for Uxrom {
 /// Bus conflicts as on UxROM and GxROM, and for the same reason.
 ///
 /// AUTHORED from the nesdev wiki's CNROM page.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Cnrom {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -861,6 +1052,14 @@ impl Cnrom {
 }
 
 impl Cartridge for Cnrom {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| (a as usize - 0x8000) % self.prg.len())
     }
@@ -951,6 +1150,8 @@ pub enum Mmc1Mirroring {
 /// and the one every SxROM game's reset code is written against.
 /// SUROM's use of a CHR bit as PRG A18 is out of scope and 512 KiB is
 /// refused by name rather than banked wrongly.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mmc1 {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -1115,6 +1316,14 @@ impl Mmc1 {
 }
 
 impl Cartridge for Mmc1 {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| self.prg_index(a))
     }
@@ -1218,6 +1427,8 @@ impl Cartridge for Mmc1 {
 ///
 /// The power-on latch is not defined by the part; both start on $FD
 /// here, and a game sets them within a frame of turning rendering on.
+#[derive(Clone)]
+#[cfg_attr(feature = "state", derive(serde::Serialize, serde::Deserialize))]
 pub struct Mmc2 {
     prg: Vec<u8>,
     chr: Vec<u8>,
@@ -1292,6 +1503,14 @@ impl Mmc2 {
 }
 
 impl Cartridge for Mmc2 {
+    #[cfg(feature = "state")]
+    fn save_state(&self) -> Option<CartState> {
+        Some(self.save_board())
+    }
+    #[cfg(feature = "state")]
+    fn load_state(&mut self, st: &CartState) -> Result<(), String> {
+        self.load_board(st)
+    }
     fn prg_offset(&self, a: u16) -> Option<usize> {
         (a >= 0x8000).then(|| self.prg_index(a))
     }

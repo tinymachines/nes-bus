@@ -22,6 +22,13 @@ dependencies, no die data, changed by nobody without a note.
 | `cart` | `CartEdge`, the 72-pin table, the `Cartridge` trait, `Nrom`, `Mmc1` (mapper 1, the serial port), `Uxrom` (2), `Cnrom` (3), `Mmc3` (4, with the scanline counter on PPU A12), `Mmc2` (9, whose CHR bank the PPU's own fetches choose), `Gxrom` (66, the bench's cartridge) | Authored from the nesdev wiki cartridge connector, MMC1, MMC2, MMC3, UxROM, CNROM and pinout pages, and the NES-001 schematic |
 | `audio` | `AudioSamples`, the AD1/AD2 stream with its rate as an exact ratio | Authored; first consumer is the 2A03 repo's first-sound milestone |
 
+With the `state` feature (off by default, and the one thing that brings
+in a dependency, serde), every board also saves and restores itself as a
+`CartState`: its registers and RAM, never its ROM, so a console can stop
+anywhere and start again there. `tests/state.rs` restores each board in
+the middle of a long run of traffic and holds it to the one that never
+stopped; `MUTATE_STATE=1` must go red.
+
 Authored means: the table is the claim until a gate in a chip repo holds
 it to a netlist pad or a scope capture, and the milestone report that
 does so says which pins it covered.
